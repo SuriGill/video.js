@@ -292,6 +292,23 @@ class Tech extends Component {
   }
 
   /**
+   * Remove any TextTracks added via addRemoteTextTrack that are
+   * flagged for automatic garbage collection
+   *
+   * @method cleanupAutoTextTracks
+   */
+  cleanupAutoTextTracks() {
+    const list = this.autoRemoteTextTracks_ || [];
+    let i = list.length;
+
+    while (i--) {
+      const track = list[i];
+
+      this.removeRemoteTextTrack(track);
+    }
+  }
+
+  /**
    * Reset the tech. Removes all sources and resets readyState.
    *
    * @method reset
@@ -531,19 +548,32 @@ class Tech extends Component {
    *
    * @param {Object} options The object should contain values for
    * kind, language, label and src (location of the WebVTT file)
+   * @param {Boolean} manualCleanup if set to false, the TextTrack will be
+   * automatically removed from the video element whenever the source changes
    * @return {HTMLTrackElement}
    * @method addRemoteTextTrack
    */
-  addRemoteTextTrack(options) {
+  addRemoteTextTrack(options, manualCleanup) {
     const track = mergeOptions(options, {
       tech: this
     });
-
     const htmlTrackElement = new HTMLTrackElement(track);
+
+    if (manualCleanup !== true && manualCleanup !== false) {
+      // deprecation warning
+      log.warn('Calling addRemoteTextTrack without explicitly setting the "manualCleanup" parameter to `true` is deprecated and default to `false` in future version of video.js');
+      manualCleanup = true;
+    }
 
     // store HTMLTrackElement and TextTrack to remote list
     this.remoteTextTrackEls().addTrackElement_(htmlTrackElement);
     this.remoteTextTracks().addTrack_(htmlTrackElement.track);
+
+    if (manualCleanup !== true) {
+      // create the TextTrackList if it doesn't exist
+      this.autoRemoteTextTracks_ = this.autoRemoteTextTracks_ || new TextTrackList();
+      this.autoRemoteTextTracks_.addTrack_(htmlTrackElement.track);
+    }
 
     // must come after remoteTextTracks()
     this.textTracks().addTrack_(htmlTrackElement.track);
@@ -565,6 +595,9 @@ class Tech extends Component {
     // remove HTMLTrackElement and TextTrack from remote list
     this.remoteTextTrackEls().removeTrackElement_(trackElement);
     this.remoteTextTracks().removeTrack_(track);
+    if (this.autoRemoteTextTracks_) {
+      this.autoRemoteTextTracks_.removeTrack_(track);
+    }
   }
 
   /**
@@ -806,6 +839,10 @@ Tech.withSourceHandlers = function(_Tech) {
   _Tech.prototype.setSource = function(source) {
     let sh = _Tech.selectSourceHandler(source, this.options_);
 
+    // Dispose any existing source handler
+    this.disposeSourceHandler();
+    this.off('dispose', this.disposeSourceHandler);
+
     if (!sh) {
       // Fall back to a native source hander when unsupported sources are
       // deliberately set
@@ -813,24 +850,11 @@ Tech.withSourceHandlers = function(_Tech) {
         sh = _Tech.nativeSourceHandler;
       } else {
         log.error('No source hander found for the current source.');
+        return;
       }
     }
 
-    // Dispose any existing source handler
-    this.disposeSourceHandler();
-    this.off('dispose', this.disposeSourceHandler);
-
-    // if we have a source and get another one
-    // then we are loading something new
-    // than clear all of our current tracks
-    if (this.currentSource_) {
-      this.clearTracks(['audio', 'video']);
-
-      this.currentSource_ = null;
-    }
-
     if (sh !== _Tech.nativeSourceHandler) {
-
       this.currentSource_ = source;
 
       // Catch if someone replaced the src without calling setSource.
@@ -838,7 +862,6 @@ Tech.withSourceHandlers = function(_Tech) {
       this.off(this.el_, 'loadstart', _Tech.prototype.firstLoadStartListener_);
       this.off(this.el_, 'loadstart', _Tech.prototype.successiveLoadStartListener_);
       this.one(this.el_, 'loadstart', _Tech.prototype.firstLoadStartListener_);
-
     }
 
     this.sourceHandler_ = sh.handleSource(source, this, this.options_);
@@ -854,7 +877,6 @@ Tech.withSourceHandlers = function(_Tech) {
 
   // On successive loadstarts when setSource has not been called again
   _Tech.prototype.successiveLoadStartListener_ = function() {
-    this.currentSource_ = null;
     this.disposeSourceHandler();
     this.one(this.el_, 'loadstart', _Tech.prototype.successiveLoadStartListener_);
   };
@@ -863,7 +885,16 @@ Tech.withSourceHandlers = function(_Tech) {
    * Clean up any existing source handler
    */
   _Tech.prototype.disposeSourceHandler = function() {
+    // if we have a source and get another one
+    // then we are loading something new
+    // then clear all of our current tracks
+    if (this.currentSource_) {
+      this.currentSource_ = null;
+    }
+
     if (this.sourceHandler_ && this.sourceHandler_.dispose) {
+      this.clearTracks(['audio', 'video']);
+      this.cleanupAutoTextTracks();
       this.off(this.el_, 'loadstart', _Tech.prototype.firstLoadStartListener_);
       this.off(this.el_, 'loadstart', _Tech.prototype.successiveLoadStartListener_);
       this.sourceHandler_.dispose();
